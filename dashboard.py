@@ -27,6 +27,17 @@ def get_data(days=7):
     if cached and (now_t - cached["time"]) < CACHE_TTL:
         return cached["data"]
 
+    # Return empty data if database doesn't exist
+    if not os.path.exists(DB_PATH):
+        return {
+            "total_tokens": 0, "total_input": 0, "total_output": 0,
+            "total_cache_read": 0, "total_sessions": 0, "total_messages": 0,
+            "tool_calls": 0, "historical_tokens": 0, "days": [],
+            "models": [], "hourly": [], "platforms": [], "providers": [],
+            "model_provider": [], "range_label": "无数据", "range_start": "", "range_end": "",
+            "updated_at": datetime.now().isoformat(), "error": f"数据库不存在: {DB_PATH}"
+        }
+
     def provider_label(base_url):
         if not base_url:
             return "未知"
@@ -64,9 +75,32 @@ def get_data(days=7):
             return model_str[:30]
 
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Check if sessions table exists
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+        if not cur.fetchone():
+            conn.close()
+            return {
+                "total_tokens": 0, "total_input": 0, "total_output": 0,
+                "total_cache_read": 0, "total_sessions": 0, "total_messages": 0,
+                "tool_calls": 0, "historical_tokens": 0, "days": [],
+                "models": [], "hourly": [], "platforms": [], "providers": [],
+                "model_provider": [], "range_label": "无数据", "range_start": "", "range_end": "",
+                "updated_at": datetime.now().isoformat(), "error": "sessions 表不存在"
+            }
+    except Exception as e:
+        return {
+            "total_tokens": 0, "total_input": 0, "total_output": 0,
+            "total_cache_read": 0, "total_sessions": 0, "total_messages": 0,
+            "tool_calls": 0, "historical_tokens": 0, "days": [],
+            "models": [], "hourly": [], "platforms": [], "providers": [],
+            "model_provider": [], "range_label": "错误", "range_start": "", "range_end": "",
+            "updated_at": datetime.now().isoformat(), "error": str(e)
+        }
 
     now = datetime.now()
     end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
