@@ -16,7 +16,7 @@
 ## 快速使用
 
 ```bash
-pip install https://github.com/<你的名字>/hermes-token-dashboard/archive/refs/heads/main.zip
+pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs/heads/main.zip
 ```
 
 ## 架构
