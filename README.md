@@ -31,20 +31,27 @@ pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs
 ### Docker（推荐）
 
 ```bash
+# ⚠️ 重要：把下面的路径改成你自己的 state.db 位置！
+# 通常在 ~/.hermes/state.db
+STATE_DB="$HOME/.hermes/state.db"
+
 docker run -d \
   --name hermes-token-dash \
   --restart unless-stopped \
   -e TZ=Asia/Shanghai \
-  -v /home/hermes/.hermes/state.db:/root/.hermes/state.db:ro \
-  -v $(pwd)/dashboard.py:/app/dashboard.py:ro \
+  -v "$STATE_DB":/root/.hermes/state.db:ro \
   -p 6088:6088 \
   python:3.11-slim \
-  sh -c 'cd /app && python3 dashboard.py'
+  sh -c 'pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs/heads/main.zip -q && python3 -c "from dashboard import main; main()"'
 ```
 
 访问 `http://<你的IP>:6088`
 
-⚠️ `-e TZ=Asia/Shanghai` 是必须的，不然 SQLite `localtime` 会掉回 UTC，所有小时图偏移 8 小时。
+⚠️ **必读提醒：**
+1. **路径必须改成你自己的** — 把 `$STATE_DB` 改成你实际的 `state.db` 路径，通常是 `~/.hermes/state.db`
+2. **时区必须设置** — `-e TZ=Asia/Shanghai` 是必须的，不然小时图会偏移 8 小时
+3. **只读挂载** — `:ro` 确保 dashboard 不会修改你的数据库
+4. **如果路径错误** — dashboard 会显示"数据库不存在"错误，不会崩溃
 
 ### 手动运行
 
