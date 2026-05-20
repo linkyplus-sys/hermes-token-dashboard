@@ -19,6 +19,11 @@
 pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs/heads/main.zip
 ```
 
+> **💡 WebUI 用户注意：**
+> Hermes WebUI 默认不会将 token 用量同步到 `state.db`，需要手动开启：
+> 打开 WebUI → 设置 → 开启 **"Sync to Insights"**
+> CLI / 飞书 / Cron 等来源的 token 默认就会记录，无需额外设置。
+
 ## 架构
 
 - **Python 3** + `http.server.ThreadingHTTPServer` — 零外部依赖
