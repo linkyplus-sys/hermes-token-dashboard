@@ -107,13 +107,23 @@ def get_data(days=7):
     all_time = (days == 0)
 
     if all_time:
-        # Weekly aggregation — query raw daily data from all time
+        # Weekly aggregation — split cross-day sessions by message ratio
         cur.execute(
             """
-            SELECT date(started_at, 'unixepoch', 'localtime') as day,
-                   SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens,
-                   COUNT(*) as sessions
-            FROM sessions
+            SELECT day, ROUND(SUM(token_share)) as tokens, SUM(is_session) as sessions
+            FROM (
+                SELECT 
+                    date(m.timestamp, 'unixepoch', 'localtime') as day,
+                    (s.input_tokens + s.output_tokens + COALESCE(s.cache_read_tokens, 0)) 
+                        * CAST(COUNT(*) AS REAL) / (
+                            SELECT COUNT(*) FROM messages 
+                            WHERE session_id = s.id
+                        ) as token_share,
+                    1 as is_session
+                FROM sessions s
+                JOIN messages m ON m.session_id = s.id
+                GROUP BY s.id, day
+            )
             GROUP BY day ORDER BY day
         """
         )
@@ -161,19 +171,28 @@ def get_data(days=7):
         start = (end - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
         cutoff = start.timestamp()
 
-        # Daily tokens by day the session started
-        # Note: session-level tokens cannot be split across days
-        # so we attribute to started_at (original behavior)
+        # Daily tokens: split cross-day sessions by message ratio per day
+        # Uses messages table to find active sessions AND to distribute tokens
         cur.execute(
             """
-            SELECT date(started_at, 'unixepoch', 'localtime') as day,
-                   SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens,
-                   COUNT(*) as sessions
-            FROM sessions
-            WHERE started_at >= ?
+            SELECT day, ROUND(SUM(token_share)) as tokens, SUM(is_session) as sessions
+            FROM (
+                SELECT 
+                    date(m.timestamp, 'unixepoch', 'localtime') as day,
+                    (s.input_tokens + s.output_tokens + COALESCE(s.cache_read_tokens, 0)) 
+                        * CAST(COUNT(*) AS REAL) / (
+                            SELECT COUNT(*) FROM messages 
+                            WHERE session_id = s.id AND timestamp >= ?
+                        ) as token_share,
+                    1 as is_session
+                FROM sessions s
+                JOIN messages m ON m.session_id = s.id
+                WHERE m.timestamp >= ?
+                GROUP BY s.id, day
+            )
             GROUP BY day ORDER BY day
         """,
-            (cutoff,),
+            (cutoff, cutoff),
         )
 
         daily_data = {}
