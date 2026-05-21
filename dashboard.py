@@ -161,7 +161,9 @@ def get_data(days=7):
         start = (end - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
         cutoff = start.timestamp()
 
-        # Total tokens by day (include cache_read — it's billed too)
+        # Daily tokens by day the session started
+        # Note: session-level tokens cannot be split across days
+        # so we attribute to started_at (original behavior)
         cur.execute(
             """
             SELECT date(started_at, 'unixepoch', 'localtime') as day,
@@ -197,10 +199,16 @@ def get_data(days=7):
         range_label = f"最近 {days} 天"
 
     # Model breakdown (include cache_read)
+    # Use subquery to find sessions active in range
     cur.execute(
         """
         SELECT model, SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens, COUNT(*) as cnt
-        FROM sessions WHERE started_at >= ? AND (input_tokens > 0 OR output_tokens > 0)
+        FROM sessions 
+        WHERE id IN (
+            SELECT DISTINCT session_id 
+            FROM messages 
+            WHERE timestamp >= ?
+        ) AND (input_tokens > 0 OR output_tokens > 0)
         GROUP BY model ORDER BY tokens DESC LIMIT 10
     """,
         (cutoff,),
@@ -212,11 +220,13 @@ def get_data(days=7):
         models.append({"name": name, "tokens": row["tokens"] or 0})
 
     # Hourly activity
+    # Use messages table to count messages by hour
     cur.execute(
         """
-        SELECT CAST(strftime('%H', started_at, 'unixepoch', 'localtime') AS INTEGER) as hour,
-               SUM(message_count) as msgs
-        FROM sessions WHERE started_at >= ?
+        SELECT CAST(strftime('%H', timestamp, 'unixepoch', 'localtime') AS INTEGER) as hour,
+               COUNT(*) as msgs
+        FROM messages 
+        WHERE timestamp >= ?
         GROUP BY hour ORDER BY hour
     """,
         (cutoff,),
@@ -226,23 +236,36 @@ def get_data(days=7):
     hourly = [{"hour": f"{h:02d}:00", "count": hour_map.get(h, 0)} for h in range(24)]
 
     # Totals (include cache_read)
+    # Use subquery to find active sessions
     cur.execute(
         """
         SELECT SUM(input_tokens) as inp, SUM(output_tokens) as out,
                SUM(COALESCE(cache_read_tokens, 0)) as cache_read,
-               COUNT(*) as cnt, SUM(message_count) as msgs,
+               COUNT(*) as cnt,
+               (SELECT COUNT(*) FROM messages WHERE timestamp >= ?) as msgs,
                SUM(tool_call_count) as tools
-        FROM sessions WHERE started_at >= ?
+        FROM sessions 
+        WHERE id IN (
+            SELECT DISTINCT session_id 
+            FROM messages 
+            WHERE timestamp >= ?
+        )
     """,
-        (cutoff,),
+        (cutoff, cutoff),
     )
     totals = cur.fetchone()
 
     # Platform breakdown (include cache_read)
+    # Use subquery to find active sessions
     cur.execute(
         """
         SELECT source, SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens, COUNT(*) as cnt
-        FROM sessions WHERE started_at >= ? AND source IS NOT NULL
+        FROM sessions 
+        WHERE id IN (
+            SELECT DISTINCT session_id 
+            FROM messages 
+            WHERE timestamp >= ?
+        ) AND source IS NOT NULL
         GROUP BY source ORDER BY tokens DESC
     """,
         (cutoff,),
@@ -250,26 +273,37 @@ def get_data(days=7):
     platforms = [{"name": r["source"] or "unknown", "tokens": r["tokens"] or 0} for r in cur.fetchall()]
 
     # API Provider breakdown (by normalized billing_base_url — shows actual API endpoint, not model name)
+    # Use subquery to find active sessions
     cur.execute(
         """
         SELECT rtrim(billing_base_url, '/') as billing_base_url_norm,
                SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens,
                COUNT(*) as cnt
-        FROM sessions WHERE started_at >= ? AND (input_tokens > 0 OR output_tokens > 0)
-        GROUP BY billing_base_url_norm ORDER BY tokens DESC
+        FROM sessions 
+        WHERE id IN (
+            SELECT DISTINCT session_id 
+            FROM messages 
+            WHERE timestamp >= ?
+        ) AND (input_tokens > 0 OR output_tokens > 0)
+        GROUP BY rtrim(billing_base_url, '/') ORDER BY tokens DESC
     """,
         (cutoff,),
     )
     providers = [{"name": provider_label(r["billing_base_url_norm"]), "tokens": r["tokens"] or 0} for r in cur.fetchall()]
 
     # Model x Provider breakdown (joint view)
+    # Use subquery to find active sessions
     cur.execute(
         """
         SELECT model, rtrim(billing_base_url, '/') as billing_base_url_norm,
                SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens
-        FROM sessions
-        WHERE started_at >= ? AND (input_tokens > 0 OR output_tokens > 0)
-        GROUP BY model, billing_base_url_norm
+        FROM sessions 
+        WHERE id IN (
+            SELECT DISTINCT session_id 
+            FROM messages 
+            WHERE timestamp >= ?
+        ) AND (input_tokens > 0 OR output_tokens > 0)
+        GROUP BY model, rtrim(billing_base_url, '/')
         ORDER BY tokens DESC
         LIMIT 14
     """,
