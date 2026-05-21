@@ -27,7 +27,7 @@ pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs
 ## 架构
 
 - **Python 3** + `http.server.ThreadingHTTPServer` — 零外部依赖
-- **SQLite** — 只读挂载 Hermes 的 `state.db`
+- **SQLite** — 只读挂载 Hermes 的 `.hermes` 目录（含 `state.db` + WAL 侧文件）
 - **Chart.js** — CDN 加载，前端动态渲染
 - **15 秒缓存** — API 端点缓存，减少 DB 压力
 
@@ -36,15 +36,15 @@ pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs
 ### Docker（推荐）
 
 ```bash
-# ⚠️ 重要：把下面的路径改成你自己的 state.db 位置！
-# 通常在 ~/.hermes/state.db
-STATE_DB="$HOME/.hermes/state.db"
+# ⚠️ 重要：把下面的路径改成你自己的 .hermes 目录！
+# 通常在 ~/.hermes/
+HERMES_DIR="$HOME/.hermes"
 
 docker run -d \
   --name hermes-token-dash \
   --restart unless-stopped \
   -e TZ=Asia/Shanghai \
-  -v "$STATE_DB":/root/.hermes/state.db:ro \
+  -v "$HERMES_DIR":/root/.hermes:ro \
   -p 6088:6088 \
   python:3.11-slim \
   sh -c 'pip install https://github.com/linkyplus-sys/hermes-token-dashboard/archive/refs/heads/main.zip -q && python3 -c "from dashboard import main; main()"'
@@ -53,7 +53,7 @@ docker run -d \
 访问 `http://<你的IP>:6088`
 
 ⚠️ **必读提醒：**
-1. **路径必须改成你自己的** — 把 `$STATE_DB` 改成你实际的 `state.db` 路径，通常是 `~/.hermes/state.db`
+1. **必须挂载整个 `.hermes` 目录**（不能只挂载 `state.db` 单文件！）— SQLite WAL 模式下，新数据写入 `state.db-wal` 侧文件，只挂载 `state.db` 会导致读到旧数据，缺少最新 session 记录
 2. **时区必须设置** — `-e TZ=Asia/Shanghai` 是必须的，不然小时图会偏移 8 小时
 3. **只读挂载** — `:ro` 确保 dashboard 不会修改你的数据库
 4. **如果路径错误** — dashboard 会显示"数据库不存在"错误，不会崩溃
