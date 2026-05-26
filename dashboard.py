@@ -105,25 +105,17 @@ def get_data(days=7):
     now = datetime.now()
     end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
     all_time = (days == 0)
+    session_day_expr = "date(s.started_at, 'unixepoch', 'localtime')"
+    session_hour_expr = "CAST(strftime('%H', s.started_at, 'unixepoch', 'localtime') AS INTEGER)"
 
     if all_time:
-        # Weekly aggregation — split cross-day sessions by message ratio
+        # Weekly aggregation — session tokens attach to their start day
         cur.execute(
-            """
-            SELECT day, ROUND(SUM(token_share)) as tokens, SUM(is_session) as sessions
-            FROM (
-                SELECT 
-                    date(m.timestamp, 'unixepoch', 'localtime') as day,
-                    (s.input_tokens + s.output_tokens + COALESCE(s.cache_read_tokens, 0)) 
-                        * CAST(COUNT(*) AS REAL) / (
-                            SELECT COUNT(*) FROM messages 
-                            WHERE session_id = s.id
-                        ) as token_share,
-                    1 as is_session
-                FROM sessions s
-                JOIN messages m ON m.session_id = s.id
-                GROUP BY s.id, day
-            )
+            f"""
+            SELECT {session_day_expr} as day,
+                   SUM(s.input_tokens + s.output_tokens + COALESCE(s.cache_read_tokens, 0)) as tokens,
+                   COUNT(*) as sessions
+            FROM sessions s
             GROUP BY day ORDER BY day
         """
         )
@@ -168,31 +160,20 @@ def get_data(days=7):
             start = now - timedelta(days=6)
         range_label = "历史全部"
     else:
-        start = (end - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
         cutoff = start.timestamp()
 
-        # Daily tokens: split cross-day sessions by message ratio per day
-        # Uses messages table to find active sessions AND to distribute tokens
+        # Daily tokens — session tokens attach to their start day
         cur.execute(
-            """
-            SELECT day, ROUND(SUM(token_share)) as tokens, SUM(is_session) as sessions
-            FROM (
-                SELECT 
-                    date(m.timestamp, 'unixepoch', 'localtime') as day,
-                    (s.input_tokens + s.output_tokens + COALESCE(s.cache_read_tokens, 0)) 
-                        * CAST(COUNT(*) AS REAL) / (
-                            SELECT COUNT(*) FROM messages 
-                            WHERE session_id = s.id AND timestamp >= ?
-                        ) as token_share,
-                    1 as is_session
-                FROM sessions s
-                JOIN messages m ON m.session_id = s.id
-                WHERE m.timestamp >= ?
-                GROUP BY s.id, day
-            )
+            f"""
+            SELECT {session_day_expr} as day,
+                   SUM(s.input_tokens + s.output_tokens + COALESCE(s.cache_read_tokens, 0)) as tokens,
+                   COUNT(*) as sessions
+            FROM sessions s
+            WHERE s.started_at >= ?
             GROUP BY day ORDER BY day
         """,
-            (cutoff, cutoff),
+            (cutoff,),
         )
 
         daily_data = {}
@@ -218,19 +199,15 @@ def get_data(days=7):
         range_label = f"最近 {days} 天"
 
     # Model breakdown (include cache_read)
-    # Use subquery to find sessions active in range
+    # Session-start boundary keeps models aligned with totals and charts
     cur.execute(
-        """
+        f"""
         SELECT model, SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens, COUNT(*) as cnt
-        FROM sessions 
-        WHERE id IN (
-            SELECT DISTINCT session_id 
-            FROM messages 
-            WHERE timestamp >= ?
-        ) AND (input_tokens > 0 OR output_tokens > 0)
-        GROUP BY model ORDER BY tokens DESC LIMIT 10
+        FROM sessions s
+        WHERE (s.started_at >= ? OR ? = 0) AND (s.input_tokens > 0 OR s.output_tokens > 0)
+        GROUP BY s.model ORDER BY tokens DESC LIMIT 10
     """,
-        (cutoff,),
+        (cutoff, cutoff),
     )
 
     models = []
@@ -239,94 +216,78 @@ def get_data(days=7):
         models.append({"name": name, "tokens": row["tokens"] or 0})
 
     # Hourly activity
-    # Use messages table to count messages by hour
+    # Align hourly distribution to session start time for consistency with totals
     cur.execute(
-        """
-        SELECT CAST(strftime('%H', timestamp, 'unixepoch', 'localtime') AS INTEGER) as hour,
-               COUNT(*) as msgs
-        FROM messages 
-        WHERE timestamp >= ?
+        f"""
+        SELECT {session_hour_expr} as hour,
+               COUNT(*) as sessions
+        FROM sessions s
+        WHERE (s.started_at >= ? OR ? = 0)
         GROUP BY hour ORDER BY hour
     """,
-        (cutoff,),
+        (cutoff, cutoff),
     )
 
-    hour_map = {row["hour"]: row["msgs"] or 0 for row in cur.fetchall()}
+    hour_map = {row["hour"]: row["sessions"] or 0 for row in cur.fetchall()}
     hourly = [{"hour": f"{h:02d}:00", "count": hour_map.get(h, 0)} for h in range(24)]
 
     # Totals (include cache_read)
-    # Use subquery to find active sessions
+    # Session-start boundary ensures totals align with charts and breakdowns
     cur.execute(
         """
-        SELECT SUM(input_tokens) as inp, SUM(output_tokens) as out,
-               SUM(COALESCE(cache_read_tokens, 0)) as cache_read,
+        SELECT SUM(s.input_tokens) as inp, SUM(s.output_tokens) as out,
+               SUM(COALESCE(s.cache_read_tokens, 0)) as cache_read,
                COUNT(*) as cnt,
-               (SELECT COUNT(*) FROM messages WHERE timestamp >= ?) as msgs,
-               SUM(tool_call_count) as tools
-        FROM sessions 
-        WHERE id IN (
-            SELECT DISTINCT session_id 
-            FROM messages 
-            WHERE timestamp >= ?
-        )
+               SUM(s.message_count) as msgs,
+               SUM(s.tool_call_count) as tools
+        FROM sessions s
+        WHERE (s.started_at >= ? OR ? = 0)
     """,
         (cutoff, cutoff),
     )
     totals = cur.fetchone()
 
     # Platform breakdown (include cache_read)
-    # Use subquery to find active sessions
+    # Session-start boundary keeps platform attribution aligned with totals
     cur.execute(
-        """
+        f"""
         SELECT source, SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens, COUNT(*) as cnt
-        FROM sessions 
-        WHERE id IN (
-            SELECT DISTINCT session_id 
-            FROM messages 
-            WHERE timestamp >= ?
-        ) AND source IS NOT NULL
+        FROM sessions s
+        WHERE (s.started_at >= ? OR ? = 0) AND source IS NOT NULL
         GROUP BY source ORDER BY tokens DESC
     """,
-        (cutoff,),
+        (cutoff, cutoff),
     )
     platforms = [{"name": r["source"] or "unknown", "tokens": r["tokens"] or 0} for r in cur.fetchall()]
 
     # API Provider breakdown (by normalized billing_base_url — shows actual API endpoint, not model name)
-    # Use subquery to find active sessions
+    # Session-start boundary ensures provider totals match overview totals
     cur.execute(
-        """
+        f"""
         SELECT rtrim(billing_base_url, '/') as billing_base_url_norm,
                SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens,
                COUNT(*) as cnt
-        FROM sessions 
-        WHERE id IN (
-            SELECT DISTINCT session_id 
-            FROM messages 
-            WHERE timestamp >= ?
-        ) AND (input_tokens > 0 OR output_tokens > 0)
-        GROUP BY rtrim(billing_base_url, '/') ORDER BY tokens DESC
+        FROM sessions s
+        WHERE (s.started_at >= ? OR ? = 0) AND (s.input_tokens > 0 OR s.output_tokens > 0)
+        GROUP BY rtrim(s.billing_base_url, '/') ORDER BY tokens DESC
     """,
-        (cutoff,),
+        (cutoff, cutoff),
     )
     providers = [{"name": provider_label(r["billing_base_url_norm"]), "tokens": r["tokens"] or 0} for r in cur.fetchall()]
 
     # Model x Provider breakdown (joint view)
-    # Use subquery to find active sessions
+    # Session-start boundary keeps joint view aligned with totals and providers
     cur.execute(
-        """
+        f"""
         SELECT model, rtrim(billing_base_url, '/') as billing_base_url_norm,
                SUM(input_tokens + output_tokens + COALESCE(cache_read_tokens, 0)) as tokens
-        FROM sessions 
-        WHERE id IN (
-            SELECT DISTINCT session_id 
-            FROM messages 
-            WHERE timestamp >= ?
-        ) AND (input_tokens > 0 OR output_tokens > 0)
-        GROUP BY model, rtrim(billing_base_url, '/')
+        FROM sessions s
+        WHERE (s.started_at >= ? OR ? = 0) AND (s.input_tokens > 0 OR s.output_tokens > 0)
+        GROUP BY s.model, rtrim(s.billing_base_url, '/')
         ORDER BY tokens DESC
         LIMIT 14
     """,
-        (cutoff,),
+        (cutoff, cutoff),
     )
     model_provider = [
         {
@@ -798,7 +759,7 @@ body::after {
   <div class="charts">
     <div class="chart-panel">
       <h3>📅 每日 Token 消耗</h3>
-      <p class="hint">按天聚合，最后一列高亮当前统计窗口的最近日期。</p>
+      <p class="hint">按会话起始日聚合，最后一列高亮当前统计窗口的最近日期。</p>
       <canvas id="dailyChart"></canvas>
     </div>
     <div class="chart-panel">
