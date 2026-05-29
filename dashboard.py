@@ -215,20 +215,20 @@ def get_data(days=7):
         name = model_label(row["model"])
         models.append({"name": name, "tokens": row["tokens"] or 0})
 
-    # Hourly activity
-    # Align hourly distribution to session start time for consistency with totals
+    # Hourly activity — count messages per hour (not sessions)
+    msg_hour_expr = "CAST(strftime('%H', m.timestamp, 'unixepoch', 'localtime') AS INTEGER)"
     cur.execute(
         f"""
-        SELECT {session_hour_expr} as hour,
-               COUNT(*) as sessions
-        FROM sessions s
-        WHERE (s.started_at >= ? OR ? = 0)
+        SELECT {msg_hour_expr} as hour,
+               COUNT(*) as cnt
+        FROM messages m
+        WHERE (m.timestamp >= ? OR ? = 0)
         GROUP BY hour ORDER BY hour
     """,
         (cutoff, cutoff),
     )
 
-    hour_map = {row["hour"]: row["sessions"] or 0 for row in cur.fetchall()}
+    hour_map = {row["hour"]: row["cnt"] or 0 for row in cur.fetchall()}
     hourly = [{"hour": f"{h:02d}:00", "count": hour_map.get(h, 0)} for h in range(24)]
 
     # Totals (include cache_read)
